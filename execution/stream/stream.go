@@ -1,3 +1,20 @@
+// Copyright 2015 ThoughtWorks, Inc.
+
+// This file is part of Gauge.
+
+// Gauge is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// Gauge is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Gauge.  If not, see <http://www.gnu.org/licenses/>.
+
 package stream
 
 import (
@@ -7,6 +24,8 @@ import (
 	"fmt"
 
 	"strings"
+
+	"sync"
 
 	"github.com/getgauge/common"
 	"github.com/getgauge/gauge/config"
@@ -20,6 +39,7 @@ import (
 	"github.com/getgauge/gauge/gauge"
 	gm "github.com/getgauge/gauge/gauge_messages"
 	"github.com/getgauge/gauge/logger"
+	"github.com/getgauge/gauge/order"
 	"github.com/getgauge/gauge/reporter"
 	"github.com/getgauge/gauge/util"
 	"github.com/getgauge/gauge/validation"
@@ -37,11 +57,16 @@ func Start() {
 		log.Fatalf("failed to listen: %v", err)
 	}
 	s := grpc.NewServer()
-	gm.RegisterExecutionServer(s, &executionServer{})
+	gm.RegisterExecutionServer(s, newExecutionServer())
 	go s.Serve(listener)
 }
 
 type executionServer struct {
+	wg *sync.WaitGroup
+}
+
+func newExecutionServer() *executionServer {
+	return &executionServer{wg: &sync.WaitGroup{}}
 }
 
 func (e *executionServer) Execute(req *gm.ExecutionRequest, stream gm.Execution_ExecuteServer) error {
@@ -50,26 +75,30 @@ func (e *executionServer) Execute(req *gm.ExecutionRequest, stream gm.Execution_
 		stream.Send(getErrorExecutionResponse(errs...))
 		return nil
 	}
-	execute(req.Specs, stream, req.GetDebug())
+	execute(req.Specs, stream, req.GetDebug(), e.wg)
+	defer e.wg.Wait()
 	return nil
 }
 
-func execute(specDirs []string, stream gm.Execution_ExecuteServer, debug bool) {
+func execute(specDirs []string, stream gm.Execution_ExecuteServer, debug bool, wg *sync.WaitGroup) {
 	res := validation.ValidateSpecs(specDirs, debug)
 	if len(res.Errs) > 0 {
 		stream.Send(getErrorExecutionResponse(res.Errs...))
 		return
 	}
 	event.InitRegistry()
-	listenExecutionEvents(stream, res.Runner.Pid())
-	rerun.ListenFailedScenarios()
+
+	listenExecutionEvents(stream, res.Runner.Pid(), wg)
+	rerun.ListenFailedScenarios(wg)
 	execution.Execute(res.SpecCollection, res.Runner, nil, res.ErrMap, execution.InParallel, 0)
 }
 
-func listenExecutionEvents(stream gm.Execution_ExecuteServer, pid int) {
+func listenExecutionEvents(stream gm.Execution_ExecuteServer, pid int, wg *sync.WaitGroup) {
 	ch := make(chan event.ExecutionEvent, 0)
 	event.Register(ch, event.SuiteStart, event.SpecStart, event.SpecEnd, event.ScenarioStart, event.ScenarioEnd, event.SuiteEnd)
 	go func() {
+		wg.Add(1)
+		defer wg.Done()
 		for {
 			e := <-ch
 			res := getResponse(e, pid)
@@ -217,10 +246,7 @@ func setFlags(req *gm.ExecutionRequest) []error {
 	reporter.NumberOfExecutionStreams = streams
 	filter.NumberOfExecutionStreams = streams
 	execution.Strategy = strings.ToLower(req.GetStrategy().String())
-	//TODO: should be changed to use Order instead
-	if req.GetSort() {
-		filter.Order = "sort"
-	}
+	order.Sorted = req.GetSort()
 	reporter.Verbose = true
 	logger.Initialize(strings.ToLower(req.GetLogLevel().String()))
 	if req.GetWorkingDir() != "" {
@@ -246,6 +272,6 @@ func resetFlags() {
 	reporter.NumberOfExecutionStreams = cores
 	filter.NumberOfExecutionStreams = cores
 	execution.Strategy = "lazy"
-	filter.Order = ""
+	order.Sorted = false
 	util.SetWorkingDir(config.ProjectRoot)
 }

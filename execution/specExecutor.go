@@ -37,15 +37,32 @@ import (
 type specExecutor struct {
 	specification        *gauge.Specification
 	runner               runner.Runner
-	pluginHandler        *plugin.Handler
+	pluginHandler        plugin.Handler
 	currentExecutionInfo *gauge_messages.ExecutionInfo
 	specResult           *result.SpecResult
 	errMap               *gauge.BuildErrors
 	stream               int
+	scenarioExecutor     executor
 }
 
-func newSpecExecutor(s *gauge.Specification, r runner.Runner, ph *plugin.Handler, e *gauge.BuildErrors, stream int) *specExecutor {
-	return &specExecutor{specification: s, runner: r, pluginHandler: ph, errMap: e, stream: stream}
+func newSpecExecutor(s *gauge.Specification, r runner.Runner, ph plugin.Handler, e *gauge.BuildErrors, stream int) *specExecutor {
+	ei := &gauge_messages.ExecutionInfo{
+		CurrentSpec: &gauge_messages.SpecInfo{
+			Name:     s.Heading.Value,
+			FileName: s.FileName,
+			IsFailed: false,
+			Tags:     getTagValue(s.Tags)},
+	}
+
+	return &specExecutor{
+		specification:        s,
+		runner:               r,
+		pluginHandler:        ph,
+		errMap:               e,
+		stream:               stream,
+		currentExecutionInfo: ei,
+		scenarioExecutor:     newScenarioExecutor(r, ph, ei, e, s.Contexts, s.TearDownSteps, stream),
+	}
 }
 
 func hasParseError(errs []error) bool {
@@ -59,10 +76,6 @@ func hasParseError(errs []error) bool {
 }
 
 func (e *specExecutor) execute(executeBefore, execute, executeAfter bool) *result.SpecResult {
-	specInfo := &gauge_messages.SpecInfo{Name: e.specification.Heading.Value,
-		FileName: e.specification.FileName,
-		IsFailed: false, Tags: getTagValue(e.specification.Tags)}
-	e.currentExecutionInfo = &gauge_messages.ExecutionInfo{CurrentSpec: specInfo}
 	e.specResult = gauge.NewSpecResult(e.specification)
 	if errs, ok := e.errMap.SpecErrs[e.specification]; ok {
 		if hasParseError(errs) {
@@ -78,16 +91,16 @@ func (e *specExecutor) execute(executeBefore, execute, executeAfter bool) *resul
 		return e.specResult
 	}
 	if len(e.specification.Scenarios) == 0 {
-		e.skipSpecForError(fmt.Errorf("%s: No scenarios found in spec\n", e.specification.FileName))
+		e.skipSpecForError(fmt.Errorf("No scenarios found in spec"))
 		return e.specResult
 	}
 
-	res := e.initSpecDataStore()
-	if res.GetFailed() {
-		e.skipSpecForError(fmt.Errorf("Failed to initialize spec datastore. Error: %s", res.GetErrorMessage()))
-		return e.specResult
-	}
 	if executeBefore {
+		res := e.initSpecDataStore()
+		if res.GetFailed() {
+			e.skipSpecForError(fmt.Errorf("Failed to initialize spec datastore. Error: %s", res.GetErrorMessage()))
+			return e.specResult
+		}
 		event.Notify(event.NewExecutionEvent(event.SpecStart, e.specification, nil, e.stream, *e.currentExecutionInfo))
 		e.notifyBeforeSpecHook()
 	}
@@ -96,7 +109,7 @@ func (e *specExecutor) execute(executeBefore, execute, executeAfter bool) *resul
 			scenarioResults := e.executeScenarios(e.specification.Scenarios)
 			e.specResult.AddScenarioResults(scenarioResults)
 		} else {
-			e.executeTableRelatedSpec()
+			e.executeSpec()
 		}
 	}
 	e.specResult.SetSkipped(e.specResult.ScenarioSkippedCount == len(e.specification.Scenarios))
@@ -107,35 +120,19 @@ func (e *specExecutor) execute(executeBefore, execute, executeAfter bool) *resul
 	return e.specResult
 }
 
-func (e *specExecutor) executeTableRelatedScenarios(scenarios []*gauge.Scenario) (result [][]result.Result) {
-	result = append(result, e.executeScenarios(scenarios))
-	return
+func (e *specExecutor) executeTableRelatedScenarios(scenarios []*gauge.Scenario) {
+	if len(scenarios) > 0 {
+		index := e.specification.Scenarios[0].DataTableRowIndex
+		result := [][]result.Result{e.executeScenarios(scenarios)}
+		e.specResult.AddTableRelatedScenarioResult(result, index)
+	}
 }
 
-func filterTableRelatedScenarios(scenarios []*gauge.Scenario, headers []string) (otherScenarios, tableRelatedScenarios []*gauge.Scenario) {
-	for _, scenario := range scenarios {
-		if scenario.UsesArgsInSteps(headers...) {
-			tableRelatedScenarios = append(tableRelatedScenarios, scenario)
-		} else {
-			otherScenarios = append(otherScenarios, scenario)
-		}
-	}
-	return
-}
-
-func (e *specExecutor) executeTableRelatedSpec() {
-	index := e.specification.Scenarios[0].DataTableRowIndex
-	if e.specification.UsesArgsInContextTeardown(e.specification.DataTable.Table.Headers...) {
-		res := e.executeTableRelatedScenarios(e.specification.Scenarios)
-		e.specResult.AddTableRelatedScenarioResult(res, index)
-
-	} else {
-		nonTableRelatedScenarios, tableRelatedScenarios := filterTableRelatedScenarios(e.specification.Scenarios, e.specification.DataTable.Table.Headers)
-		res := e.executeScenarios(nonTableRelatedScenarios)
-		e.specResult.AddScenarioResults(res)
-		tableDrivenRes := e.executeTableRelatedScenarios(tableRelatedScenarios)
-		e.specResult.AddTableRelatedScenarioResult(tableDrivenRes, index)
-	}
+func (e *specExecutor) executeSpec() {
+	nonTableRelatedScenarios, tableRelatedScenarios := parser.FilterTableRelatedScenarios(e.specification.Scenarios, e.specification.DataTable.Table.Headers)
+	res := e.executeScenarios(nonTableRelatedScenarios)
+	e.specResult.AddScenarioResults(res)
+	e.executeTableRelatedScenarios(tableRelatedScenarios)
 }
 
 func (e *specExecutor) resolveItems(items []gauge.Item) []*gauge_messages.ProtoItem {
@@ -206,7 +203,8 @@ func (e *specExecutor) initSpecDataStore() *gauge_messages.ProtoExecutionResult 
 func (e *specExecutor) notifyBeforeSpecHook() {
 	m := &gauge_messages.Message{MessageType: gauge_messages.Message_SpecExecutionStarting,
 		SpecExecutionStartingRequest: &gauge_messages.SpecExecutionStartingRequest{CurrentExecutionInfo: e.currentExecutionInfo}}
-	res := executeHook(m, e.specResult, e.runner, e.pluginHandler)
+	e.pluginHandler.NotifyPlugins(m)
+	res := executeHook(m, e.specResult, e.runner)
 	if res.GetFailed() {
 		setSpecFailure(e.currentExecutionInfo)
 		handleHookFailure(e.specResult, res, result.AddPreHook)
@@ -216,15 +214,15 @@ func (e *specExecutor) notifyBeforeSpecHook() {
 func (e *specExecutor) notifyAfterSpecHook() {
 	m := &gauge_messages.Message{MessageType: gauge_messages.Message_SpecExecutionEnding,
 		SpecExecutionEndingRequest: &gauge_messages.SpecExecutionEndingRequest{CurrentExecutionInfo: e.currentExecutionInfo}}
-	res := executeHook(m, e.specResult, e.runner, e.pluginHandler)
+	res := executeHook(m, e.specResult, e.runner)
 	if res.GetFailed() {
 		setSpecFailure(e.currentExecutionInfo)
 		handleHookFailure(e.specResult, res, result.AddPostHook)
 	}
+	e.pluginHandler.NotifyPlugins(m)
 }
 
-func executeHook(message *gauge_messages.Message, execTimeTracker result.ExecTimeTracker, r runner.Runner, ph *plugin.Handler) *gauge_messages.ProtoExecutionResult {
-	ph.NotifyPlugins(message)
+func executeHook(message *gauge_messages.Message, execTimeTracker result.ExecTimeTracker, r runner.Runner) *gauge_messages.ProtoExecutionResult {
 	executionResult := r.ExecuteAndGetStatus(message)
 	execTimeTracker.AddExecTime(executionResult.GetExecutionTime())
 	return executionResult
@@ -333,8 +331,7 @@ func (e *specExecutor) executeScenario(scenario *gauge.Scenario) *result.Scenari
 	scenarioResult := result.NewScenarioResult(gauge.NewProtoScenario(scenario))
 	e.addAllItemsForScenarioExecution(scenario, scenarioResult)
 
-	scenarioExec := newScenarioExecutor(e.runner, e.pluginHandler, e.currentExecutionInfo, e.errMap, e.stream)
-	scenarioExec.execute(scenarioResult, scenario, e.specification.Contexts, e.specification.TearDownSteps)
+	e.scenarioExecutor.execute(scenario, scenarioResult)
 	if scenarioResult.ProtoScenario.GetExecutionStatus() == gauge_messages.ExecutionStatus_SKIPPED {
 		e.specResult.ScenarioSkippedCount++
 	}

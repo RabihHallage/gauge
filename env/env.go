@@ -28,8 +28,11 @@ import (
 )
 
 const (
-	GaugeReportsDir = "gauge_reports_dir"
-	LogsDirectory   = "logs_directory"
+	GaugeReportsDir     = "gauge_reports_dir"
+	LogsDirectory       = "logs_directory"
+	OverwriteReports    = "overwrite_reports"
+	ScreenshotOnFailure = "screenshot_on_failure"
+	SaveExecutionResult = "save_execution_result" // determines if last run result should be saved
 )
 
 var envVars map[string]string
@@ -70,8 +73,9 @@ func LoadEnv(envName string) error {
 func loadDefaultEnvVars() {
 	addEnvVar(GaugeReportsDir, "reports")
 	addEnvVar(LogsDirectory, "logs")
-	addEnvVar("overwrite_reports", "true")
-	addEnvVar("screenshot_on_failure", "true")
+	addEnvVar(OverwriteReports, "true")
+	addEnvVar(ScreenshotOnFailure, "true")
+	addEnvVar(SaveExecutionResult, "false")
 }
 
 func loadEnvDir(envName string) error {

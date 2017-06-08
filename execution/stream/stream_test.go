@@ -24,6 +24,8 @@ import (
 
 	"os"
 
+	"sync"
+
 	"github.com/getgauge/gauge/config"
 	"github.com/getgauge/gauge/execution"
 	"github.com/getgauge/gauge/execution/event"
@@ -31,6 +33,7 @@ import (
 	"github.com/getgauge/gauge/filter"
 	"github.com/getgauge/gauge/gauge"
 	gm "github.com/getgauge/gauge/gauge_messages"
+	"github.com/getgauge/gauge/order"
 	"github.com/getgauge/gauge/reporter"
 	"github.com/getgauge/gauge/util"
 	"golang.org/x/net/context"
@@ -198,8 +201,10 @@ func (s *MySuite) TestGetErrorsWithStepAndConceptFailures(c *C) {
 func (s *MySuite) TestListenSuiteStartExecutionEvent(c *C) {
 	event.InitRegistry()
 	actual := make(chan *gm.ExecutionResponse)
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
 
-	listenExecutionEvents(&dummyServer{response: actual}, 1234)
+	listenExecutionEvents(&dummyServer{response: actual}, 1234, wg)
 	event.Notify(event.NewExecutionEvent(event.SuiteStart, nil, nil, 0, gm.ExecutionInfo{}))
 	defer sendSuiteEnd(actual)
 
@@ -217,8 +222,10 @@ func (s *MySuite) TestListenSpecStartExecutionEvent(c *C) {
 	ei := gm.ExecutionInfo{
 		CurrentSpec: &gm.SpecInfo{FileName: "example.spec"},
 	}
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
 
-	listenExecutionEvents(&dummyServer{response: actual}, 1234)
+	listenExecutionEvents(&dummyServer{response: actual}, 1234, wg)
 	defer sendSuiteEnd(actual)
 	event.Notify(event.NewExecutionEvent(event.SpecStart, nil, nil, 0, ei))
 
@@ -236,8 +243,10 @@ func (s *MySuite) TestListenScenarioStartExecutionEvent(c *C) {
 	ei := gm.ExecutionInfo{
 		CurrentSpec: &gm.SpecInfo{FileName: "example.spec"},
 	}
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
 
-	listenExecutionEvents(&dummyServer{response: actual}, 1234)
+	listenExecutionEvents(&dummyServer{response: actual}, 1234, wg)
 	defer sendSuiteEnd(actual)
 	event.Notify(event.NewExecutionEvent(event.ScenarioStart, &gauge.Scenario{Heading: &gauge.Heading{LineNo: 1}}, nil, 0, ei))
 
@@ -259,8 +268,10 @@ func (s *MySuite) TestListenSpecEndExecutionEvent(c *C) {
 		CurrentSpec: &gm.SpecInfo{FileName: "example.spec"},
 	}
 	hookFailure := []*gm.ProtoHookFailure{{ErrorMessage: "err msg"}}
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
 
-	listenExecutionEvents(&dummyServer{response: actual}, 1234)
+	listenExecutionEvents(&dummyServer{response: actual}, 1234, wg)
 	defer sendSuiteEnd(actual)
 	event.Notify(event.NewExecutionEvent(event.SpecEnd, nil, &result.SpecResult{
 		ProtoSpec: &gm.ProtoSpec{PreHookFailures: hookFailure, PostHookFailures: hookFailure},
@@ -282,8 +293,10 @@ func (s *MySuite) TestListenSuiteEndExecutionEvent(c *C) {
 	event.InitRegistry()
 	actual := make(chan *gm.ExecutionResponse)
 	hookFailure := &gm.ProtoHookFailure{ErrorMessage: "err msg"}
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
 
-	listenExecutionEvents(&dummyServer{response: actual}, 1234)
+	listenExecutionEvents(&dummyServer{response: actual}, 1234, wg)
 	event.Notify(event.NewExecutionEvent(event.SuiteEnd, nil, &result.SuiteResult{PreSuite: hookFailure, PostSuite: hookFailure}, 0, gm.ExecutionInfo{}))
 
 	expected := &gm.ExecutionResponse{
@@ -307,8 +320,10 @@ func (s *MySuite) TestListenScenarioEndExecutionEvent(c *C) {
 		ScenarioItems: []*gm.ProtoItem{},
 		ExecutionTime: 1,
 	}
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
 
-	listenExecutionEvents(&dummyServer{response: actual}, 1234)
+	listenExecutionEvents(&dummyServer{response: actual}, 1234, wg)
 	defer sendSuiteEnd(actual)
 	event.Notify(event.NewExecutionEvent(event.ScenarioEnd, &gauge.Scenario{Heading: &gauge.Heading{LineNo: 1}}, result.NewScenarioResult(scn), 0, ei))
 
@@ -338,8 +353,10 @@ func (s *MySuite) TestListenScenarioEndExecutionEventForFailedScenario(c *C) {
 		ExecutionTime:   1,
 		ExecutionStatus: gm.ExecutionStatus_FAILED,
 	}
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
 
-	listenExecutionEvents(&dummyServer{response: actual}, 1234)
+	listenExecutionEvents(&dummyServer{response: actual}, 1234, wg)
 	defer sendSuiteEnd(actual)
 	event.Notify(event.NewExecutionEvent(event.ScenarioEnd, &gauge.Scenario{Heading: &gauge.Heading{LineNo: 1}}, result.NewScenarioResult(scn), 0, ei))
 
@@ -398,7 +415,7 @@ func (s *MySuite) TestSetFlags(c *C) {
 	c.Assert(execution.NumberOfExecutionStreams, Equals, 3)
 	c.Assert(reporter.NumberOfExecutionStreams, Equals, 3)
 	c.Assert(filter.NumberOfExecutionStreams, Equals, 3)
-	c.Assert(filter.Order, Equals, "sort")
+	c.Assert(order.Sorted, Equals, true)
 	c.Assert(filter.ExecuteTags, Equals, "tag1 & tag2")
 	c.Assert(reporter.Verbose, Equals, true)
 	c.Assert(reporter.IsParallel, Equals, true)
@@ -427,7 +444,7 @@ func (s *MySuite) TestResetFlags(c *C) {
 	execution.NumberOfExecutionStreams = 1
 	reporter.NumberOfExecutionStreams = 2
 	filter.NumberOfExecutionStreams = 3
-	filter.Order = "sort"
+	order.Sorted = true
 	resetFlags()
 
 	cores := util.NumberOfCores()
@@ -436,7 +453,7 @@ func (s *MySuite) TestResetFlags(c *C) {
 	c.Assert(execution.NumberOfExecutionStreams, Equals, cores)
 	c.Assert(reporter.NumberOfExecutionStreams, Equals, cores)
 	c.Assert(filter.NumberOfExecutionStreams, Equals, cores)
-	c.Assert(filter.Order, Equals, "")
+	c.Assert(order.Sorted, Equals, false)
 	c.Assert(filter.ExecuteTags, Equals, "")
 	c.Assert(reporter.Verbose, Equals, false)
 	c.Assert(reporter.IsParallel, Equals, false)

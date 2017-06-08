@@ -25,7 +25,12 @@ import (
 
 	"strings"
 
+	"os"
+
+	"sync"
+
 	"github.com/getgauge/gauge/config"
+	"github.com/getgauge/gauge/env"
 	"github.com/getgauge/gauge/execution/event"
 	"github.com/getgauge/gauge/execution/rerun"
 	"github.com/getgauge/gauge/execution/result"
@@ -36,28 +41,33 @@ import (
 	"github.com/getgauge/gauge/plugin/install"
 	"github.com/getgauge/gauge/reporter"
 	"github.com/getgauge/gauge/runner"
+	"github.com/getgauge/gauge/util"
 	"github.com/getgauge/gauge/validation"
 )
 
 var NumberOfExecutionStreams int
 var InParallel bool
 
-type execution interface {
+type suiteExecutor interface {
 	run() *result.SuiteResult
+}
+
+type executor interface {
+	execute(i gauge.Item, r result.Result)
 }
 
 type executionInfo struct {
 	manifest        *manifest.Manifest
 	specs           *gauge.SpecCollection
 	runner          runner.Runner
-	pluginHandler   *plugin.Handler
+	pluginHandler   plugin.Handler
 	errMaps         *gauge.BuildErrors
 	inParallel      bool
 	numberOfStreams int
 	stream          int
 }
 
-func newExecutionInfo(s *gauge.SpecCollection, r runner.Runner, ph *plugin.Handler, e *gauge.BuildErrors, p bool, stream int) *executionInfo {
+func newExecutionInfo(s *gauge.SpecCollection, r runner.Runner, ph plugin.Handler, e *gauge.BuildErrors, p bool, stream int) *executionInfo {
 	m, err := manifest.ProjectManifest()
 	if err != nil {
 		logger.Fatalf(err.Error())
@@ -98,18 +108,23 @@ func ExecuteSpecs(specDirs []string) int {
 		return 1
 	}
 	event.InitRegistry()
-	reporter.ListenExecutionEvents()
-	rerun.ListenFailedScenarios()
+	wg := &sync.WaitGroup{}
+	reporter.ListenExecutionEvents(wg)
+	rerun.ListenFailedScenarios(wg)
+	if util.ConvertToBool(os.Getenv(env.SaveExecutionResult), env.SaveExecutionResult, false) {
+		ListenSuiteEndAndSaveResult(wg)
+	}
+	defer wg.Wait()
 	ei := newExecutionInfo(res.SpecCollection, res.Runner, nil, res.ErrMap, InParallel, 0)
 	e := newExecution(ei)
 	return printExecutionStatus(e.run(), res.ParseOk)
 }
 
-func Execute(s *gauge.SpecCollection, r runner.Runner, ph *plugin.Handler, e *gauge.BuildErrors, p bool, n int) {
+func Execute(s *gauge.SpecCollection, r runner.Runner, ph plugin.Handler, e *gauge.BuildErrors, p bool, n int) {
 	newExecution(newExecutionInfo(s, r, ph, e, p, n)).run()
 }
 
-func newExecution(executionInfo *executionInfo) execution {
+func newExecution(executionInfo *executionInfo) suiteExecutor {
 	if executionInfo.inParallel {
 		return newParallelExecution(executionInfo)
 	}

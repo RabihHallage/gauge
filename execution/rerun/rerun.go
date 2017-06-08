@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"sync"
+
 	"github.com/getgauge/common"
 	"github.com/getgauge/gauge/config"
 	"github.com/getgauge/gauge/execution/event"
@@ -91,11 +93,12 @@ func (m *failedMetadata) addFailedItem(itemName string, item string) {
 }
 
 // ListenFailedScenarios listens to execution events and writes the failed scenarios to JSON file
-func ListenFailedScenarios() {
+func ListenFailedScenarios(wg *sync.WaitGroup) {
 	ch := make(chan event.ExecutionEvent, 0)
 	event.Register(ch, event.ScenarioEnd)
 	event.Register(ch, event.SpecEnd)
 	event.Register(ch, event.SuiteEnd)
+	wg.Add(1)
 
 	go func() {
 		for {
@@ -109,6 +112,7 @@ func ListenFailedScenarios() {
 				addFailedMetadata(e.Result, addSuiteFailedMetadata)
 				failedMeta.aggregateFailedItems()
 				writeFailedMeta(getJSON(failedMeta))
+				wg.Done()
 			}
 		}
 	}()
